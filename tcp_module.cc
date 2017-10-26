@@ -2,7 +2,7 @@
 // stub that does nothing but integrate into the stack
 
 // For project parts A and B, an appropriate binary will be 
-// copied over as part of the build process
+// copied over as part of the build processd
 
 
 
