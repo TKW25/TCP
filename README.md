@@ -24,7 +24,7 @@ Bob Colleran:
 
 
 ## Compilation steps
-Source files go in src/modules, run the Makefile in the minet folder, executables will be in bin
+Source files go in src/modules, run the Makefile in the minet folder, start minet and run a tcp server in user space
 
 ## Not working
 
