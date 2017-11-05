@@ -19,7 +19,7 @@ Taimah Williams:
     -Setup TCP State and enum eState
     -Wrote IP Packet boilerplate
     -Added MakeOutputPacket method and enum HeaderType
-    -Added code to handle IP packets while in LISTEN, ESTABSISHED and SYN_RCVD states
+    -Wrote code to handle IP packets
 
 Bob Colleran:
 

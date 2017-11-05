@@ -27,6 +27,8 @@
 
 using namespace std;
 
+unsigned int MSL_TIME_SECS = 120;
+
 enum eState {
     CLOSED = 0,
     LISTEN = 1,
@@ -36,9 +38,9 @@ enum eState {
     SEND_DATA = 5,
     CLOSE_WAIT = 6,
     FIN_WAIT1 = 7,
-    CLOSING = 8,
-    LAST_ACK = 9,
-    FIN_WAIT2 = 10,
+    FIN_WAIT2 = 8,
+    CLOSING = 9,
+    LAST_ACK = 10,
     TIME_WAIT = 11
 };
 
@@ -217,6 +219,17 @@ int main(int argc, char * argv[]) {
 				SockRequestResponse write(CLOSE, cs->connection, content, 0, EOK);
 				MinetSend(sock, write);
 			    }
+			    else if(IS_SYN(flags)){
+				//Our ACK from SYN_SEND was dropped, resend
+				cs->state.last_recv = seq;
+				cs->state.rwnd = ws;
+				cs->bTmrActive = false;
+				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
+				MinetSend(mux, out);
+				//I'm assuming that we haven't sent any additional packets
+				//So our sequence number should be the same as when we sent the
+				//lost ACK
+			    }
 			    if(IS_ACK(flags)){
 				//We might have received a FIN,ACK
 				//Also could have simply received an ACK for data we've sent
@@ -248,14 +261,67 @@ int main(int argc, char * argv[]) {
 				cs->state.last_sent += 1;
 			    }
 			    break;
-			case SYN_SENT: break; //Waiting to receive SYN,ACK or SYN
+			case SYN_SENT: //Waiting to receive SYN,ACK or SYN
+			    if(IS_SYN(flags) && IS_ACK(flags)){
+				//Received SYN,ACK respond with ACK and move to ESTABLISHED
+				cs->state.state = ESTABLISHED;
+				cs->state.last_acked = ack;
+				cs->state.last_recv = seq;
+				cs->state.rwnd = ws;
+				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
+				MinetSend(mux, out);
+				cs->state.last_sent += 1;
+			    }
+			    else if(IS_SYN(flags)){
+				//Receive SYN, move to SYN_RECV
+				cs->state.state = SYN_RCVD;
+				cs->state.last_recv = seq;
+				cs->state.rwnd = ws;
+				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
+				MinetSend(mux, out);
+				cs->state.last_sent += 1;
+			    }
+			    break;
 			case SEND_DATA: break;  //Do nothing, in process of sending data. This state might not be necessary
 			case CLOSE_WAIT: break; //Do nothing, waiting for socket to send down CLOSE
-			case FIN_WAIT1: break; //Sent FIN waiting for ACK or FIN
+			case FIN_WAIT1: //Sent FIN waiting for ACK or FIN
+			    if(IS_ACK(flags))
+				cs->state.state = FIN_WAIT2; 
+			    if(!IS_FIN(flags))
+			        break;
+			    //Fallthrough, we've received a FINACK
+			case FIN_WAIT2: //Waiting for FIN after sending a FIN and receiving an ACK
+			    if(IS_FIN(flags)){
+				cs->state.state = TIME_WAIT;
+				cs->state.last_recv = seq;
+				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
+				//We need to setup a timeout in case this ACK gets lost so our partner
+				//can close elegantly
+				cs->bTmrActive = true;
+				cs->timeout = Time() + (2*MSL_TIME_SECS);
+				MinetSend(mux, out);
+				//No need to update our sequence number since at this point
+				//the only packets we should be sending is resending this packet
+				//if it gets lost.  At least I think...
+			    }
+			    break;
 			case CLOSING: break; //Received FIN while waiting for ACK of FIN
-			case LAST_ACK: break; //Received FIN, sent ACK and FIN, now waiting for final ACK
-			case FIN_WAIT2: break; //Waiting for FIN after sending a FIN and receiving an ACK
-			case TIME_WAIT: break; //Received FIN sent  ACK, wait for timeout (2MSL) in case ACK gets lost
+			case LAST_ACK: //Received FIN, sent ACK and FIN, now waiting for final ACK
+			    if(IS_ACK(flags)){
+				//Got our final ack, close the connection
+				cs->state.state = CLOSED;
+				clist.erase(cs);
+			    }
+			    break;
+			case TIME_WAIT: //Received FIN sent  ACK, wait for timeout (2MSL) in case ACK gets lost
+			    if(IS_FIN(flags)){
+				//resend ACK and reset the timer
+				cs->state.last_recv = seq;
+				cs->timeout = Time() + (2*MSL_TIME_SECS);
+				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
+				MinetSend(mux, out);
+			    }
+			    break;
 		    }
 		}
 		else{
