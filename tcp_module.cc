@@ -4,7 +4,13 @@
 // For project parts A and B, an appropriate binary will be 
 // copied over as part of the build process
 
-
+//TODO 
+//Add CLOSING state stuff
+//Check code against Minet specifications and the TCP 
+//State diagram to confirm correct logic
+//Debug (kill me)
+//If everything above goes well consider adding 
+//flow/congestion control (probably not)
 
 #include <sys/time.h>
 #include <sys/types.h>
@@ -28,6 +34,8 @@
 using namespace std;
 
 unsigned int MSL_TIME_SECS = 120;
+unsigned int TCP_MAXIMUM_SEGMENT_SIZE = 536;
+unsigned int TCP_BUFFER_SIZE = 536 * 100;
 
 enum eState {
     CLOSED = 0,
@@ -50,7 +58,8 @@ enum HeaderType {
     SYNACK = 3, 
     FIN = 4,
     FINACK = 5,
-    RESET = 6
+    RESET = 6,
+    NOFLAG = 999
 };
 
 struct TCPState {
@@ -74,7 +83,7 @@ struct TCPState {
 
 void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, size_t size, bool t, HeaderType h);
 void WrapMinetSend(const MinetHandle &mux, Packet p, bool corrupt, bool reorder, bool drop);
-
+bool SendOutputData(const MinetHandle &mux, ConnectionList<TCPState>::iterator cs, Buffer d, bool t);
 
 int main(int argc, char * argv[]) {
     MinetHandle mux;
@@ -199,7 +208,11 @@ int main(int argc, char * argv[]) {
 				cs->state.rwnd = ws;
 				cs->bTmrActive = false; //Currently no unack'd packets
 				//Send signal up to the socket
-				SockRequestResponse write(WRITE, cs->connection, content, 0, EOK);
+				SockRequestResponse write;
+				write.type = WRITE; 
+				write.connection = cs->connection;
+				write.bytes = 0;
+				write.error = EOK;
 				MinetSend(sock, write);
 				//Socket should eventually respond down to us with a STATUS
 			    }
@@ -271,6 +284,13 @@ int main(int argc, char * argv[]) {
 				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
 				MinetSend(mux, out);
 				cs->state.last_sent += 1;
+				SockRequestResponse write;
+				write.type = WRITE; 
+				write.connection = cs->connection;
+				write.bytes = 0;
+				write.error = EOK;
+				MinetSend(sock, write);
+
 			    }
 			    else if(IS_SYN(flags)){
 				//Receive SYN, move to SYN_RECV
@@ -326,6 +346,7 @@ int main(int argc, char * argv[]) {
 		}
 		else{
 		    //Packet corrupted print error monitor and do nothing
+		    //That or we reack not sure...
 		    cerr << "ERROR! Corrupted Packet\n";
 		    MinetSendToMonitor(MinetMonitoringEvent("ERROR! Corrupted Packet\n"));
 		}
@@ -333,11 +354,225 @@ int main(int argc, char * argv[]) {
 
 	    if (event.handle == sock) {
 		// socket request or response has arrived
+		SockRequestResponse req;
+		MinetReceive(sock, req);
+		ConnectionList<TCPState>::iterator cs = clist.FindMatching(req.connection);
+		if(cs == clist.end()){
+		    //Connection doesn't exist
+		    switch(req.type){
+			case CONNECT: {
+			    //Active open
+			    //Create a new TCPState
+			    TCPState state; 
+			    state.state = SYN_SENT;
+			    state.last_recv = 0;
+			    //state.N = 16 * TCP_MAXIMUM_SEGMENT_SIZE;
+			    state.rwnd = 0;
+			    srand(Time());
+			    state.last_acked = rand();
+			    state.last_sent = state.last_acked;
+			    //Create a Connection State Mapping to add to clist
+			    ConnectionToStateMapping<TCPState> CTSM(req.connection, Time()+2, state, true);
+			    //We set a short timer since we want to timeout quickly since Minet is
+			    //going to throw away our first packet
+			    clist.push_back(CTSM); //add connection on clist
+			    //Make output packet
+			    cs = clist.FindMatching(req.connection);
+			    Packet out; MakeOutputPacket(out, cs, 0, false, SYN);
+			    MinetSend(mux, out);
+			    //Now that we've successfully created our packet we need to let the application know
+			    SockRequestResponse reply;
+			    reply.type = STATUS;
+			    reply.connection = req.connection;
+			    reply.error = EOK;
+			    MinetSend(sock, reply);
+			    break; }
+			case ACCEPT: {
+			    //Passive open
+			    //Set up TCP state
+			    TCPState state;
+			    state.state = LISTEN;
+			    state.last_recv = 0;
+			    //state.N = 16 * TCP_MAXIMUM_SEGMENT_SIZE;
+			    state.rwnd = 0;
+			    srand(Time());
+			    state.last_acked = rand();
+			    state.last_sent = state.last_acked;
+			    //Create Connection to State Mapping
+			    ConnectionToStateMapping<TCPState> CTSM(req.connection, Time(), state, false);
+			    clist.push_back(CTSM);
+			    //Message socket
+			    SockRequestResponse reply;
+			    reply.type = STATUS;
+			    reply.error = EOK;
+			    MinetSend(sock, reply);
+			    break; }
+			case WRITE: {
+			    //Can't write on a connection which doesn't exist
+			    SockRequestResponse reply;
+			    reply.type = STATUS;
+			    reply.error = ENOMATCH;
+			    MinetSend(sock, reply);			    
+			    break; }
+			case FORWARD: {
+			    //TCP will just return a status here
+			    SockRequestResponse reply;
+			    reply.type = STATUS;
+			    reply.error = EOK;
+			    MinetSend(sock, reply);
+			    break; }
+			case CLOSE: {
+			    //Can't close a connection which doesn't exist
+			    SockRequestResponse reply;
+			    reply.type = STATUS;
+			    reply.connection = req.connection;
+			    reply.error = ENOMATCH;
+			    break; }
+			case STATUS: {
+			    //This shouldn't happen
+			    SockRequestResponse reply;
+			    reply.type = STATUS;
+			    reply.error = ENOMATCH;
+			    break; }
+		    }
+		}
+		else{
+		    //Connection exists
+		    switch(req.type){
+			case CONNECT:
+			    //already connected
+			    break;
+			case ACCEPT:
+			    //already connected
+			    break;
+			case WRITE: {
+			    //Send buffer contents to remote partner
+			    if(cs->state.state == ESTABLISHED){
+				if(cs->state.SendBuffer.GetSize() + req.data.GetSize() > TCP_BUFFER_SIZE){
+				    //Not enough space in Buffer
+				    SockRequestResponse reply;
+				    reply.type = STATUS;
+				    reply.error = EBUF_SPACE;
+				    MinetSend(sock, reply);
+				}
+				else{
+				    //Add new data to send buffer
+				    int size = req.data.GetSize();
+				    bool success = SendOutputData(mux, cs, req.data, false);
+				    cs->bTmrActive = true;
+				    cs->timeout = Time() + 21;
+				    if(success){
+					SockRequestResponse reply;
+					reply.type = STATUS;
+					reply.error = EOK;
+					reply.connection = req.connection;
+					reply.bytes = size;
+					MinetSend(sock, reply);
+				    }
+				    else{
+					SockRequestResponse reply;
+					reply.type = STATUS;
+					reply.error = EUNKNOWN;
+					MinetSend(sock, reply);
+				    }
+				}
+			    }
+			    else{
+				SockRequestResponse reply;
+				reply.type = STATUS;
+				reply.error = EINVALID_OP;
+				MinetSend(sock, reply);
+			    }
+			    break; }
+			case FORWARD: {
+			    SockRequestResponse reply;
+			    reply.type = STATUS;
+			    reply.error = EOK;
+			    MinetSend(sock, reply);
+			    break; }
+			case CLOSE: {
+			    //Close the connection
+			    eState s = cs->state.state;
+			    if(s == ESTABLISHED || s == SYN_RCVD || s == CLOSE_WAIT){
+				//Valid state to receive CLOSE
+				if(s == CLOSE_WAIT)
+				    cs->state.state = LAST_ACK;
+				else
+				    cs->state.state = FIN_WAIT1;
+				cs->bTmrActive = true;
+				cs->timeout = Time() + 21;
+				//Send packet
+				Packet out; MakeOutputPacket(out, cs, 0, false, FIN);
+				MinetSend(mux, out);
+				cs->state.last_sent += 1;
+				//Inform socket
+				SockRequestResponse reply;
+				reply.type = STATUS;
+				reply.error = EOK;
+				reply.connection = req.connection;
+				MinetSend(sock, reply);
+			    }
+			    else{
+				SockRequestResponse reply;
+				reply.type = STATUS;
+				reply.error = EINVALID_OP;
+				reply.connection = req.connection;
+				MinetSend(sock, reply);
+			    }
+			    break; }
+			case STATUS: {
+			    //Resend unaccepted bytes to sock
+			    cs->state.RecvBuffer.Erase(0, req.bytes); //Delete accepted bytes
+			    //Resend unaccepted ones
+			    SockRequestResponse write(WRITE, cs->connection, cs->state.RecvBuffer, cs->state.RecvBuffer.GetSize(), EOK);
+			    MinetSend(sock, write);
+			    break; }
+		    }
+		}
 	    }
 	}
 
 	if (event.eventtype == MinetEvent::Timeout) {
 	    // timeout ! probably need to resend some packets
+	    ConnectionList<TCPState>::iterator cs = clist.FindEarliest();
+	    if(cs != clist.end()){ //Make sure our list isn't empty
+		if(Time() > cs->timeout){ //See if it's timed out
+		    //There are a few potential states where we can get a timeout
+		    //SYN_SENT we need to resend our SYN
+		    //SYN_RCVD we need to resend our SYNACK
+		    //Both FIN_WAIT1 and LAST_ACK we need to resnd FIN
+		    //TIME_WAIT we need to close the connection
+		    //ESTABLISHED we might need to resend our SendBuffer
+		    switch(cs->state.state){
+			case SYN_RCVD: {
+			    Packet out; MakeOutputPacket(out, cs, 0, true, SYNACK);
+			    MinetSend(mux, out);
+		 	    break; }
+			case ESTABLISHED: {
+			    SendOutputData(mux, cs, cs->state.SendBuffer, true);
+			    break; }
+			case SYN_SENT: {
+			    Packet out; MakeOutputPacket(out, cs, 0, true, SYN);
+			    MinetSend(mux, out);
+			    break; }
+			case FIN_WAIT1:
+			case LAST_ACK: {
+			    Packet out; MakeOutputPacket(out, cs, 0, true, FIN);
+			    break; }
+			case TIME_WAIT: {
+			    cs->state.state = CLOSED;
+			    clist.erase(cs);
+			    break; }
+			case CLOSED:
+			case LISTEN:
+			case SEND_DATA:
+			case CLOSE_WAIT:
+			case FIN_WAIT2:
+			case CLOSING:
+			default: break;
+		    }
+		}
+	    }
 	}
 
     }
@@ -347,6 +582,43 @@ int main(int argc, char * argv[]) {
     return 0;
 }
 
+bool SendOutputData(const MinetHandle &mux, ConnectionList<TCPState>::iterator cs, Buffer d, bool t){
+    //Send our sendbuffer + d to remote host
+    size_t left;
+    size_t off = 0;
+    if(t){
+	left = cs->state.SendBuffer.GetSize();
+    }
+    else{
+	off = cs->state.SendBuffer.GetSize();
+	left = d.GetSize();
+	cs->state.SendBuffer.AddBack(d);
+    }
+    bool first = true;
+    unsigned int to_send;
+    int size;
+    Buffer send;
+    Packet out;
+    while(left != 0){
+	to_send = min(left, TCP_MAXIMUM_SEGMENT_SIZE);
+        char buff[to_send + 1];
+	size = cs->state.SendBuffer.GetData(buff, to_send, off);
+	buff[to_send + 1] = '\0';
+	send.SetData(buff, size, 0);
+	out = send.Extract(0, size);
+	left -= to_send;
+	cs->state.last_sent += to_send;
+	off += size;
+	if(first)
+	    MakeOutputPacket(out, cs, size, t, NOFLAG);
+	else
+	    MakeOutputPacket(out, cs, size, false, NOFLAG);
+    }
+    if(left == 0)
+	return true;
+    else
+	return false;
+}
 void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, size_t size, bool t, HeaderType h){
     //We'll be doing this alot so it's more convenient to have this in a function
     //Even if it makes the code a little more complex here
@@ -380,7 +652,7 @@ void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, size_t s
 	tcph.SetSeqNum(cs->state.last_sent, p);
     }
     //Get appropriate flags
-    unsigned char flags;
+    unsigned char flags = 0000;
     switch(h){
 	case SYN: SET_SYN(flags); break;
 	case ACK: SET_ACK(flags); break;
@@ -388,7 +660,7 @@ void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, size_t s
 	case FIN: SET_FIN(flags); break;
 	case FINACK: SET_FIN(flags); SET_ACK(flags); break;
 	case RESET: SET_RST(flags); break;
-	default: cerr << "Something is broke\n"; break;
+	default: cerr << "Sending data...\n"; break;
     }
     tcph.SetFlags(flags, p);
     tcph.RecomputeChecksum(p);
