@@ -4,7 +4,7 @@
 // For project parts A and B, an appropriate binary will be 
 // copied over as part of the build process
 
-//TODO 
+//TODO Hi HI
 //Test and Debug (critical)
 //Check code against Minet specifications and the TCP 
 //State diagram to confirm correct logic
@@ -79,7 +79,7 @@ struct TCPState {
     }
 };
 
-void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, size_t size, bool t, HeaderType h);
+void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, int size, bool t, HeaderType h);
 void WrapMinetSend(const MinetHandle &mux, Packet p, bool corrupt, bool reorder, bool drop);
 bool SendOutputData(const MinetHandle &mux, ConnectionList<TCPState>::iterator cs, Buffer d, bool t);
 
@@ -125,7 +125,7 @@ int main(int argc, char * argv[]) {
 //    bool corrupt = false;
 //    bool reorder = false;
 //    bool drop = false;
-
+    
     while (MinetGetNextEvent(event, timeout) == 0) {
 	if ((event.eventtype == MinetEvent::Dataflow) && 
 	    (event.direction == MinetEvent::IN)) {
@@ -148,7 +148,7 @@ int main(int argc, char * argv[]) {
 		tcph.GetDestPort(c.srcport);
 		tcph.GetSourcePort(c.destport);
 		//End copied UDP boilerplate
-
+		cerr << tcph << endl;
 		//Get tcp and ip header information
 		unsigned char flags; //URG, ACK, PSH, RST, SYN, FIN
 		tcph.GetFlags(flags);
@@ -171,7 +171,9 @@ int main(int argc, char * argv[]) {
 		//Get Connection's State
 		ConnectionList<TCPState>::iterator cs = clist.FindMatching(c);
 		//All relevant TCP information collected
-
+		//cerr << flags << endl << ack << endl << seq << endl;
+		//cerr << ws << endl << clen << endl;
+		//cerr << cs->state.state << endl;
 		//Error check and handle Packet
 		if(checksumok){
 		    //Handle packet
@@ -186,7 +188,7 @@ int main(int argc, char * argv[]) {
 				cs->state.last_acked = cs->state.last_sent; //Set last_acked to our starting sequence number 
 				cs->state.last_recv = seq;
 				cs->bTmrActive = true;
-				cs->timeout = Time() + 21; //I'm not certain if it matters what we add as long as we add soemthing
+				cs->timeout = Time() + 1; //Short timeout since minet will drop anyway
 				cs->connection = c;
 				//Our connection's state should be all setup correctly now
 				//Make and send packet
@@ -204,13 +206,12 @@ int main(int argc, char * argv[]) {
 				cs->state.rwnd = ws;
 				cs->bTmrActive = false; //Currently no unack'd packets
 				//Send signal up to the socket
-				SockRequestResponse write;
-				write.type = WRITE; 
-				write.connection = cs->connection;
-				write.bytes = 0;
-				write.error = EOK;
+				SockRequestResponse write(WRITE, cs->connection, content, 0, EOK);
+				//write.type = WRITE; 
+				//write.connection = cs->connection;
+				//write.bytes = 0;
+				//write.error = EOK;
 				MinetSend(sock, write);
-				cerr << "Writing: " << write << endl;
 				//Socket should eventually respond down to us with a STATUS
 			    }
 			    break; 
@@ -223,14 +224,13 @@ int main(int argc, char * argv[]) {
 				cs->state.last_recv = seq;
 				cs->state.rwnd = ws;
 				cs->bTmrActive = true;
-				cs->timeout = Time() + 21;
+				cs->timeout = Time() + 8;
 				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
 				MinetSend(mux, out);
 				cs->state.last_sent += 1;
 				//We need to inform the application remote partner has initiated close
 				SockRequestResponse write(CLOSE, cs->connection, content, 0, EOK);
 				MinetSend(sock, write);
-				cerr << "Writing: " << write << endl;
 			    }
 			    else if(IS_SYN(flags)){
 				//Our ACK from SYN_SEND was dropped, resend
@@ -251,6 +251,7 @@ int main(int argc, char * argv[]) {
 				//We need to check if we've received a duplicate ack
 				if(ack > cs->state.last_acked){
 				   //ack is new, note we might have a cumulative ack
+				   cerr << "is it\n";
 				   int cum = ack - cs->state.last_acked;
 				   cs->state.SendBuffer.Erase(0, cum); //erase all acked packets from buffer
 				   if(cs->state.SendBuffer.GetSize() == 0){
@@ -266,16 +267,15 @@ int main(int argc, char * argv[]) {
 			    if(clen > 0){
 				//We've received data to send up to the application
 				cerr << "Received content\n";
-				cs->state.last_recv = seq + content.GetSize();
+				cs->state.last_recv = seq + sizeof(char) * content.GetSize() - 1;
 				cs->state.rwnd = ws;
 				cs->state.RecvBuffer.AddBack(content);
 				SockRequestResponse write(WRITE, cs->connection, cs->state.RecvBuffer, cs->state.RecvBuffer.GetSize(), EOK);
 				//We'll clear RecvBuffer once socket sends us down a status telling us it's read it
 				//But regardless we ACKd
 				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
-				MinetSend(mux, out);
 				MinetSend(sock, write);
-				cerr << "Writing: " << write << endl;
+				MinetSend(mux, out);
 				cs->state.last_sent += 1;
 			    }
 			    break;
@@ -297,7 +297,6 @@ int main(int argc, char * argv[]) {
 				write.bytes = 0;
 				write.error = EOK;
 				MinetSend(sock, write);
-				cerr << "Writing: " << write << endl;
 			    }
 			    else if(IS_SYN(flags)){
 				//Receive SYN, move to SYN_RECV
@@ -368,6 +367,7 @@ int main(int argc, char * argv[]) {
 			    }
 			    break;
 		    }
+		    cerr << "Nothing is happening\n";
 		}
 		else{
 		    //Packet corrupted print error monitor and do nothing
@@ -505,7 +505,7 @@ int main(int argc, char * argv[]) {
 				    int size = req.data.GetSize();
 				    bool success = SendOutputData(mux, cs, req.data, false);
 				    cs->bTmrActive = true;
-				    cs->timeout = Time() + 21;
+				    cs->timeout = Time() + 8;
 				    if(success){
 					SockRequestResponse reply;
 					reply.type = STATUS;
@@ -551,7 +551,7 @@ int main(int argc, char * argv[]) {
 				else
 				    cs->state.state = FIN_WAIT1;
 				cs->bTmrActive = true;
-				cs->timeout = Time() + 21;
+				cs->timeout = Time() + 8;
 				//Send packet
 				Packet out; MakeOutputPacket(out, cs, 0, false, FIN);
 				MinetSend(mux, out);
@@ -564,24 +564,20 @@ int main(int argc, char * argv[]) {
 				MinetSend(sock, reply);
 				cerr << "Replying: " << reply << endl;
 			    }
-			    else{
-				SockRequestResponse reply;
-				reply.type = STATUS;
-				reply.error = EINVALID_OP;
-				reply.connection = req.connection;
-				MinetSend(sock, reply);
-				cerr << "Can't close in this state...\nReplying: " << reply << endl;
-			    }
 			    break; }
 			case STATUS: {
 			    //Resend unaccepted bytes to sock
 			    cerr << "Resending data to application\n";
 			    cs->state.RecvBuffer.Erase(0, req.bytes); //Delete accepted bytes
-			    //Resend unaccepted ones
-			    SockRequestResponse write(WRITE, cs->connection, cs->state.RecvBuffer, cs->state.RecvBuffer.GetSize(), EOK);
-			    MinetSend(sock, write);
-			    cerr << "Replying: " << write << endl;
-			    break; }
+			    if(cs->state.RecvBuffer.GetSize() != 0){
+			        //Resend unaccepted ones
+			        SockRequestResponse write(WRITE, cs->connection, cs->state.RecvBuffer, cs->state.RecvBuffer.GetSize(), EOK);
+			        MinetSend(sock, write);
+			        cerr << "Replying: " << write << endl;
+			        break; 
+			    }
+			    else
+				cerr << "Everything accepted!\n";}
 		    }
 		}
 	    }
@@ -613,6 +609,7 @@ int main(int argc, char * argv[]) {
 			    break; }
 			case FIN_WAIT1: {
 			    Packet out; MakeOutputPacket(out, cs, 0, true, FIN);
+			    MinetSend(mux, out);
 			    break; }
 			case LAST_ACK: {
 			    Packet out; MakeOutputPacket(out, cs, 0, true, FIN);
@@ -686,7 +683,7 @@ bool SendOutputData(const MinetHandle &mux, ConnectionList<TCPState>::iterator c
     else
 	return false;
 }
-void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, size_t size, bool t, HeaderType h){
+void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, int size, bool t, HeaderType h){
     //We'll be doing this alot so it's more convenient to have this in a function
     //Even if it makes the code a little more complex here
     cerr << "Creating packet to send...\n";
@@ -698,13 +695,15 @@ void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, size_t s
     iph.SetSourceIP(cs->connection.src);
     iph.SetDestIP(cs->connection.dest);
     iph.SetTotalLength(size);
-    cerr << iph << endl;
+    
+//    cerr << iph << endl;
+
     //Push it on packet
     p.PushFrontHeader(iph);
     //Build TCP Header
-    tcph.SetHeaderLen(5, p);
     tcph.SetSourcePort(cs->connection.srcport, p);
     tcph.SetDestPort(cs->connection.destport, p);
+    tcph.SetHeaderLen(5, p);
     tcph.SetAckNum(cs->state.last_recv + 1, p);
     tcph.SetWinSize(cs->state.win_size, p);
     tcph.SetUrgentPtr(0, p);
@@ -733,13 +732,15 @@ void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, size_t s
     tcph.SetFlags(flags, p);
     tcph.RecomputeChecksum(p);
     //Finished building TCP header
+  
     cerr << tcph << endl;
+
     if(!tcph.IsCorrectChecksum(p)){
 	cerr << "Checksum failed in building packet, something is seriously wrong\n";
     }
     //Put it in the packet
     p.PushBackHeader(tcph);
-    cerr << "Finished constructing packet:\n" << p << endl;
+//    cerr << "Finished constructing packet:\n" << p << endl;
 } 
 
 void WrapMinetSend(const MinetHandle &mux, Packet p, bool corrupt, bool reorder, bool drop){
