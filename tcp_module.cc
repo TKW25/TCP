@@ -4,12 +4,6 @@
 // For project parts A and B, an appropriate binary will be 
 // copied over as part of the build process
 
-//TODO Hi HI
-//Test and Debug (critical)
-//Check code against Minet specifications and the TCP 
-//State diagram to confirm correct logic
-//Add flow/congestion control (probably not enough time)
-
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
