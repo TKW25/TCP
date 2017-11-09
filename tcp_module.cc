@@ -188,6 +188,8 @@ int main(int argc, char * argv[]) {
 				cs->state.last_acked = cs->state.last_sent; //Set last_acked to our starting sequence number 
 				cs->state.last_recv = seq;
 				cs->bTmrActive = true;
+				cs->state.win_size = TCP_BUFFER_SIZE;
+				cs->state.rwnd = ws;
 				cs->timeout = Time() + 1; //Short timeout since minet will drop anyway
 				cs->connection = c;
 				//Our connection's state should be all setup correctly now
@@ -227,9 +229,13 @@ int main(int argc, char * argv[]) {
 				cs->timeout = Time() + 8;
 				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
 				MinetSend(mux, out);
-				cs->state.last_sent += 1;
+				//cs->state.last_sent += 1;
 				//We need to inform the application remote partner has initiated close
-				SockRequestResponse write(CLOSE, cs->connection, content, 0, EOK);
+				//SockRequestResponse write(CLOSE, cs->connection, content, 0, EOK);
+				SockRequestResponse write;
+				write.type = WRITE;
+				write.connection = cs->connection;
+				write.bytes = 0;
 				MinetSend(sock, write);
 			    }
 			    else if(IS_SYN(flags)){
@@ -264,10 +270,23 @@ int main(int argc, char * argv[]) {
 				   //Congestion control stuff would go here if we decide to implement it
 				}
 			    }
+			    if(cs->state.state == CLOSE_WAIT)
+				break;
 			    if(clen > 0){
 				//We've received data to send up to the application
 				cerr << "Received content\n";
-				cs->state.last_recv = seq + sizeof(char) * content.GetSize() - 1;
+				cerr << content << endl;
+
+				//Find number of NULL (padding) bytes in content
+				int pad = 1;
+				for(unsigned int i = 0; i < content.GetSize(); i++){
+				    cerr << content[i];
+				    if(content[i] == 0)
+					pad++;
+				}
+				pad = content.GetSize() - pad;
+
+				cs->state.last_recv = seq + pad;
 				cs->state.rwnd = ws;
 				cs->state.RecvBuffer.AddBack(content);
 				SockRequestResponse write(WRITE, cs->connection, cs->state.RecvBuffer, cs->state.RecvBuffer.GetSize(), EOK);
@@ -276,7 +295,7 @@ int main(int argc, char * argv[]) {
 				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
 				MinetSend(sock, write);
 				MinetSend(mux, out);
-				cs->state.last_sent += 1;
+				//cs->state.last_sent += 1;
 			    }
 			    break;
 			case SYN_SENT: //Waiting to receive SYN,ACK or SYN
@@ -285,12 +304,13 @@ int main(int argc, char * argv[]) {
 				//Received SYN,ACK respond with ACK and move to ESTABLISHED
 				cerr << "Received SYNACK\n";
 				cs->state.state = ESTABLISHED;
+				cs->bTmrActive = false;
 				cs->state.last_acked = ack;
 				cs->state.last_recv = seq;
 				cs->state.rwnd = ws;
 				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
 				MinetSend(mux, out);
-				cs->state.last_sent += 1;
+				//cs->state.last_sent += 1;
 				SockRequestResponse write;
 				write.type = WRITE; 
 				write.connection = cs->connection;
@@ -304,9 +324,14 @@ int main(int argc, char * argv[]) {
 				cs->state.state = SYN_RCVD;
 				cs->state.last_recv = seq;
 				cs->state.rwnd = ws;
+				cs->bTmrActive = true;
+				cs->timeout = Time() + 8;
 				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
 				MinetSend(mux, out);
 				cs->state.last_sent += 1;
+			    }
+			    else{
+				cs->timeout = Time() + 8;
 			    }
 			    break;
 			case SEND_DATA: break;  //Do nothing, in process of sending data. This state might not be necessary
@@ -329,6 +354,7 @@ int main(int argc, char * argv[]) {
 				cerr << "In FIN_WAIT2\n";
 				cs->state.state = TIME_WAIT;
 				cs->state.last_recv = seq;
+				cs->state.last_sent += 1;
 				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
 				//We need to setup a timeout in case this ACK gets lost so our partner
 				//can close elegantly
@@ -393,12 +419,13 @@ int main(int argc, char * argv[]) {
 			    cerr << "Active open...\n";
 			    TCPState state; 
 			    state.state = SYN_SENT;
-			    state.last_recv = 0;
+			    state.last_recv = -1;
 			    //state.N = 16 * TCP_MAXIMUM_SEGMENT_SIZE;
 			    state.rwnd = 0;
 			    srand(Time());
-			    state.last_acked = rand();
-			    state.last_sent = state.last_acked;
+			    state.last_sent = (unsigned int) rand() % 1000000;
+			    state.last_acked = state.last_sent;
+			    state.win_size = TCP_BUFFER_SIZE;
 			    //Create a Connection State Mapping to add to clist
 			    ConnectionToStateMapping<TCPState> CTSM(req.connection, Time()+2, state, true);
 			    //We set a short timer since we want to timeout quickly since Minet is
@@ -406,6 +433,8 @@ int main(int argc, char * argv[]) {
 			    clist.push_back(CTSM); //add connection on clist
 			    //Make output packet
 			    cs = clist.FindMatching(req.connection);
+			    cs->bTmrActive = true;
+			    cs->timeout = Time() + 2;
 			    Packet out; MakeOutputPacket(out, cs, 0, false, SYN);
 			    MinetSend(mux, out);
 			    //Now that we've successfully created our packet we need to let the application know
@@ -552,10 +581,12 @@ int main(int argc, char * argv[]) {
 				    cs->state.state = FIN_WAIT1;
 				cs->bTmrActive = true;
 				cs->timeout = Time() + 8;
+				//cs->state.last_recv = 0;
+				//cs->state.win_size = 0;
 				//Send packet
-				Packet out; MakeOutputPacket(out, cs, 0, false, FIN);
+				Packet out; MakeOutputPacket(out, cs, 0, false, FINACK);
 				MinetSend(mux, out);
-				cs->state.last_sent += 1;
+				//cs->state.last_sent += 1;
 				//Inform socket
 				SockRequestResponse reply;
 				reply.type = STATUS;
@@ -606,6 +637,7 @@ int main(int argc, char * argv[]) {
 			case SYN_SENT: {
 			    Packet out; MakeOutputPacket(out, cs, 0, true, SYN);
 			    MinetSend(mux, out);
+			    cs->state.last_sent += 1;
 			    break; }
 			case FIN_WAIT1: {
 			    Packet out; MakeOutputPacket(out, cs, 0, true, FIN);
@@ -667,7 +699,6 @@ bool SendOutputData(const MinetHandle &mux, ConnectionList<TCPState>::iterator c
 	send.SetData(buff, size, 0);
 	out = send.Extract(0, size);
 	left -= to_send;
-	cs->state.last_sent += to_send;
 	off += size;
 	if(first) {
 	    MakeOutputPacket(out, cs, size, t, NOFLAG);
@@ -676,6 +707,7 @@ bool SendOutputData(const MinetHandle &mux, ConnectionList<TCPState>::iterator c
 	else
 	    MakeOutputPacket(out, cs, size, false, NOFLAG);
 	MinetSend(mux, out);
+	cs->state.last_sent += to_send;
     }
     cerr << "Finished sending data...\n";
     if(left == 0)
@@ -727,7 +759,8 @@ void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, int size
 	case FIN: SET_FIN(flags); break;
 	case FINACK: SET_FIN(flags); SET_ACK(flags); break;
 	case RESET: SET_RST(flags); break;
-	default: cerr << "Sending data...\n"; break;
+	case NOFLAG: SET_ACK(flags); SET_PSH(flags);
+	default: cerr << "Sending data...\n";  break;
     }
     tcph.SetFlags(flags, p);
     tcph.RecomputeChecksum(p);
