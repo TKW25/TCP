@@ -30,7 +30,6 @@ Implements the TCP protocol using the Minet stack to the specifications layed ou
     You may assume that exceptional conditions such as aborts do not occur.
 
     You should generate IP packets no larger than 576 bytes, and you should set your
-
     MSS (maximum [TCP] segment size) accordingly, to 536 bytes. Notice that this
     is the default MSS that TCP uses if there is no MSS option when a connection is
     negotiated
