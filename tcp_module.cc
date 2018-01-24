@@ -74,7 +74,6 @@ struct TCPState {
 };
 
 void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, int size, bool t, HeaderType h);
-void WrapMinetSend(const MinetHandle &mux, Packet p, bool corrupt, bool reorder, bool drop);
 bool SendOutputData(const MinetHandle &mux, ConnectionList<TCPState>::iterator cs, Buffer d, bool t);
 
 int main(int argc, char * argv[]) {
@@ -115,10 +114,6 @@ int main(int argc, char * argv[]) {
 
     MinetEvent event;
     double timeout = 1;
-    //Debugging bools, set to true to test if we handle errors correctly
-//    bool corrupt = false;
-//    bool reorder = false;
-//    bool drop = false;
     
     while (MinetGetNextEvent(event, timeout) == 0) {
 	if ((event.eventtype == MinetEvent::Dataflow) && 
@@ -165,9 +160,7 @@ int main(int argc, char * argv[]) {
 		//Get Connection's State
 		ConnectionList<TCPState>::iterator cs = clist.FindMatching(c);
 		//All relevant TCP information collected
-		//cerr << flags << endl << ack << endl << seq << endl;
-		//cerr << ws << endl << clen << endl;
-		//cerr << cs->state.state << endl;
+
 		//Error check and handle Packet
 		if(checksumok){
 		    //Handle packet
@@ -203,10 +196,6 @@ int main(int argc, char * argv[]) {
 				cs->bTmrActive = false; //Currently no unack'd packets
 				//Send signal up to the socket
 				SockRequestResponse write(WRITE, cs->connection, content, 0, EOK);
-				//write.type = WRITE; 
-				//write.connection = cs->connection;
-				//write.bytes = 0;
-				//write.error = EOK;
 				MinetSend(sock, write);
 				//Socket should eventually respond down to us with a STATUS
 			    }
@@ -223,9 +212,7 @@ int main(int argc, char * argv[]) {
 				cs->timeout = Time() + 8;
 				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
 				MinetSend(mux, out);
-				//cs->state.last_sent += 1;
 				//We need to inform the application remote partner has initiated close
-				//SockRequestResponse write(CLOSE, cs->connection, content, 0, EOK);
 				SockRequestResponse write;
 				write.type = WRITE;
 				write.connection = cs->connection;
@@ -285,11 +272,10 @@ int main(int argc, char * argv[]) {
 				cs->state.RecvBuffer.AddBack(content);
 				SockRequestResponse write(WRITE, cs->connection, cs->state.RecvBuffer, cs->state.RecvBuffer.GetSize(), EOK);
 				//We'll clear RecvBuffer once socket sends us down a status telling us it's read it
-				//But regardless we ACKd
+				//But regardless we ACK
 				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
 				MinetSend(sock, write);
 				MinetSend(mux, out);
-				//cs->state.last_sent += 1;
 			    }
 			    break;
 			case SYN_SENT: //Waiting to receive SYN,ACK or SYN
@@ -304,7 +290,6 @@ int main(int argc, char * argv[]) {
 				cs->state.rwnd = ws;
 				Packet out; MakeOutputPacket(out, cs, 0, false, ACK);
 				MinetSend(mux, out);
-				//cs->state.last_sent += 1;
 				SockRequestResponse write;
 				write.type = WRITE; 
 				write.connection = cs->connection;
@@ -328,8 +313,8 @@ int main(int argc, char * argv[]) {
 				cs->timeout = Time() + 8;
 			    }
 			    break;
-			case SEND_DATA: break;  //Do nothing, in process of sending data. This state might not be necessary
-			case CLOSE_WAIT: break; //Do nothing, waiting for socket to send down CLOSE
+			case SEND_DATA: break;  //Do nothing, in process of sending data. 
+			case CLOSE_WAIT: break; //Do nothing, waiting for socket to send down CLOSE.
 			case FIN_WAIT1: //Sent FIN waiting for ACK or FIN
 			    cerr << "In FIN_WAIT1\n";
 			    if(IS_ACK(flags))
@@ -357,7 +342,7 @@ int main(int argc, char * argv[]) {
 				MinetSend(mux, out);
 				//No need to update our sequence number since at this point
 				//the only packets we should be sending is resending this packet
-				//if it gets lost.  At least I think...
+				//if it gets lost.
 			    }
 			    break;
 			case CLOSING: 
@@ -391,7 +376,6 @@ int main(int argc, char * argv[]) {
 		}
 		else{
 		    //Packet corrupted print error monitor and do nothing
-		    //That or we reack not sure...
 		    cerr << "ERROR! Corrupted Packet\n";
 		    MinetSendToMonitor(MinetMonitoringEvent("ERROR! Corrupted Packet\n"));
 		}
@@ -414,7 +398,6 @@ int main(int argc, char * argv[]) {
 			    TCPState state; 
 			    state.state = SYN_SENT;
 			    state.last_recv = -1;
-			    //state.N = 16 * TCP_MAXIMUM_SEGMENT_SIZE;
 			    state.rwnd = 0;
 			    srand(Time());
 			    state.last_sent = (unsigned int) rand() % 1000000;
@@ -446,7 +429,6 @@ int main(int argc, char * argv[]) {
 			    TCPState state;
 			    state.state = LISTEN;
 			    state.last_recv = 0;
-			    //state.N = 16 * TCP_MAXIMUM_SEGMENT_SIZE;
 			    state.rwnd = 0;
 			    srand(Time());
 			    state.last_acked = rand();
@@ -514,7 +496,7 @@ int main(int argc, char * argv[]) {
 			    //Send buffer contents to remote partner
 			    if(cs->state.state == ESTABLISHED){
 				if(cs->state.SendBuffer.GetSize() + req.data.GetSize() > TCP_BUFFER_SIZE){
-				    //Not enough space in Buffer
+				    //Not enough space in Buffer, inform application that we're dropping it
 				    cerr << "Buffer can't fit data\n";
 				    SockRequestResponse reply;
 				    reply.type = STATUS;
@@ -575,12 +557,9 @@ int main(int argc, char * argv[]) {
 				    cs->state.state = FIN_WAIT1;
 				cs->bTmrActive = true;
 				cs->timeout = Time() + 8;
-				//cs->state.last_recv = 0;
-				//cs->state.win_size = 0;
 				//Send packet
 				Packet out; MakeOutputPacket(out, cs, 0, false, FINACK);
 				MinetSend(mux, out);
-				//cs->state.last_sent += 1;
 				//Inform socket
 				SockRequestResponse reply;
 				reply.type = STATUS;
@@ -710,8 +689,7 @@ bool SendOutputData(const MinetHandle &mux, ConnectionList<TCPState>::iterator c
 	return false;
 }
 void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, int size, bool t, HeaderType h){
-    //We'll be doing this alot so it's more convenient to have this in a function
-    //Even if it makes the code a little more complex here
+    //Code is more complex here for the sake of reuse
     cerr << "Creating packet to send...\n";
     IPHeader iph;
     TCPHeader tcph;
@@ -722,7 +700,6 @@ void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, int size
     iph.SetDestIP(cs->connection.dest);
     iph.SetTotalLength(size);
     
-//    cerr << iph << endl;
 
     //Push it on packet
     p.PushFrontHeader(iph);
@@ -767,10 +744,4 @@ void MakeOutputPacket(Packet &p, ConnectionList<TCPState>::iterator cs, int size
     }
     //Put it in the packet
     p.PushBackHeader(tcph);
-//    cerr << "Finished constructing packet:\n" << p << endl;
 } 
-
-void WrapMinetSend(const MinetHandle &mux, Packet p, bool corrupt, bool reorder, bool drop){
-    //This should be used for error testing but we're kinda short on time so probably won't be
-    MinetSend(mux, p);
-}
