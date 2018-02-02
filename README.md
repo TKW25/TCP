@@ -1,5 +1,5 @@
 # An implementation of the TCP protocol using the Minet stack
-Implements the TCP protocol using the Minet stack to the specifications layed out in RFC 793 with some exceptiosn.
+Implements the TCP protocol using the Minet stack to the specifications laid out in RFC 793 with some exceptions.
 
 ## Exceptions
     You only need to implement Go-Back-N
